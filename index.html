@@ -95,7 +95,50 @@ let remoteReady=false;
 function isDelhiViewOnlyMaster_(){return !!(current&&current.type==='master'&&String(current.id).toUpperCase()==='STS0RP');}
 async function api(action,payload={}){ if(API_URL.includes('PASTE_')) return null; try{ const r=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,...payload,actorId:current&&current.id?String(current.id):''})}); return await r.json(); }catch(e){ console.warn('API',e); return null; }}
 let remoteLoadInFlight=null; async function loadRemote(){ if(remoteLoadInFlight) return remoteLoadInFlight; remoteLoadInFlight=(async()=>{ const r=await api('load'); if(r&&r.ok&&r.db){ db=r.db; ensureTrainerData(); saveLocal(); remoteReady=true; return true;} ensureTrainerData(); return false; })(); try{return await remoteLoadInFlight;}finally{remoteLoadInFlight=null;} }
-function saveLocal(){localStorage.setItem('stsTrainerDB',JSON.stringify(db))}
+function saveLocal(){
+  // Browser storage is only a cache; Google Apps Script/Sheets remains authoritative.
+  // A localStorage quota error must not turn a successful server-side inspection into a failed action.
+  const storageKey='stsTrainerDB';
+  const compactForStorage=(value)=>{
+    if(Array.isArray(value)) return value.map(v=>compactForStorage(v));
+    if(value&&typeof value==='object'){
+      const out={};
+      Object.keys(value).forEach(k=>{out[k]=compactForStorage(value[k]);});
+      return out;
+    }
+    if(typeof value==='string' && value.length>1000 && /^data:(image|application|audio|video)\//i.test(value)) return '';
+    if(typeof value==='string' && value.length>500000 && /^(?:[A-Za-z0-9+/=\r\n]+)$/.test(value)) return '';
+    return value;
+  };
+  try{
+    localStorage.setItem(storageKey,JSON.stringify(db));
+    return true;
+  }catch(firstError){
+    try{
+      localStorage.setItem(storageKey,JSON.stringify(compactForStorage(db)));
+      console.warn('Local cache compacted to fit browser storage. Server data is unchanged.');
+      return true;
+    }catch(secondError){
+      try{
+        // Clear only this app's oversized local cache and keep a small metadata-only cache.
+        localStorage.removeItem(storageKey);
+        const minimal={
+          employeeAccounts:db.employeeAccounts||{}, locations:db.locations||[],
+          attendance:(db.attendance||[]).map(a=>{const x={...a};if(typeof x.photo==='string'&&x.photo.startsWith('data:'))x.photo='';return x;}),
+          assignments:(db.assignments||[]).map(a=>{const x={...a};if(x.file&&typeof x.file==='object')x.file={name:x.file.name||'',url:x.file.url||x.file.fileUrl||''};return x;}),
+          notices:db.notices||[], leaves:db.leaves||[], weekly:db.weekly||[], monthly:db.monthly||[],
+          concerns:db.concerns||[], allocations:db.allocations||{}, schoolMapVersion:db.schoolMapVersion
+        };
+        localStorage.setItem(storageKey,JSON.stringify(minimal));
+        console.warn('Local cache reduced to metadata because browser storage is full. Server data is unchanged.');
+        return true;
+      }catch(finalError){
+        console.warn('Browser storage is full; local cache could not be written. Server operations can continue.',finalError);
+        return false;
+      }
+    }
+  }
+}
 async function save(){saveLocal(); if(API_URL.includes('PASTE_')) return db; const r=await api('save',{db}); if(r&&r.ok&&r.db){ db=r.db; saveLocal(); setTimeout(()=>{ if(current){ mode==='master'?renderMaster(window.activeMaster||'Overview'):renderTrainer(window.activeTrainer||'Overview'); }},80); } return db;}
 
 let db=JSON.parse(localStorage.getItem('stsTrainerDB')||'null')||{employeeAccounts:{},locations:[],attendance:[],assignments:[{id:1,title:'Prepare Grade 6 Robotics Activity',description:'Prepare components and lesson flow for the upcoming robotics session.',assignedTo:'STS01',due:'2026-10-02',priority:'High',status:'Pending',file:null}],notices:[{id:1,title:'Monthly planning',text:'Please keep your school activity records updated before the monthly review.',date:'2026-09-30'}],leaves:[],weekly:[],monthly:[],concerns:[],allocations:trainers.reduce((a,t)=>{a[t.id]=t.schools.slice();return a},{})};
